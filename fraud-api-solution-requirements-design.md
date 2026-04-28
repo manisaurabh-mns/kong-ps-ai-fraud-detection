@@ -42,6 +42,11 @@ the underlying LLM is never directly exposed to consumers.
   - Open Banking
 - Full auditability and traceability of all decisions
 
+> **Demo deployment note:** The demo setup on AWS EKS uses Spot instances (single node group,
+> no multi-AZ redundancy, single NAT Gateway). HA and scalability requirements above apply
+> to the production target state. The demo environment is designed to be spun up, demonstrated,
+> and torn down the same day via `terraform destroy`.
+
 ---
 
 ## 3. Scope
@@ -82,4 +87,22 @@ the underlying LLM is never directly exposed to consumers.
 ## 5. High‑Level Architecture
 
 ```text
-Client → Kong Gateway → Business APIs → Fraud API → LLM Provider
+Client
+  │
+  │  (Demo: kubectl port-forward | Prod: AWS NLB)
+  ▼
+Kong Gateway  [EKS namespace: kong]
+  │  OAuth/OIDC, Rate Limiting, Schema Validation, PII Redaction
+  ▼
+Business APIs  [EKS namespace: fintech-services]
+  │  accounts-service  /  transactions-service
+  │  (transactions-service calls Fraud API internally via mTLS)
+  ▼
+Fraud API  [EKS namespace: fraud-api]
+  │  Rule Engine → Feature Extractor → Decision Synthesizer
+  │  (calls LLM for AI reasoning — LLM is external to cluster)
+  ▼
+LLM Provider  [External — Azure OpenAI private endpoint]
+  │
+  └─ Response filtered by Fraud API → structured decision only returned
+```
