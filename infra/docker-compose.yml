@@ -21,12 +21,7 @@ services:
     image: kongcx/accounts-service:1.0.1
     container_name: accounts-service
     ports:
-      - "8081:8080"
-    healthcheck:
-      test: [ "CMD", "wget", "-qO-", "http://localhost:8080/health" ]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      - "8081:8081"
     networks:
       - kong-net
     restart: unless-stopped
@@ -35,12 +30,7 @@ services:
     image: docker.io/kongcx/transactions-service:1.0.1
     container_name: transactions-service
     ports:
-      - "8082:8080"
-    healthcheck:
-      test: [ "CMD", "wget", "-qO-", "http://localhost:8080/health" ]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      - "8082:8082"
     networks:
       - kong-net
     restart: unless-stopped
@@ -52,6 +42,9 @@ services:
   kong-dp:
     image: kong/kong-gateway:3.9
     container_name: kong-dp
+    env_file:
+      - path: ../.env
+        required: true
     environment:
       KONG_ROLE: data_plane
       KONG_DATABASE: "off"
@@ -86,10 +79,8 @@ services:
       - "8100:8100" # Status / /metrics endpoint (Prometheus scrape)
 
     depends_on:
-      accounts-service:
-        condition: service_healthy
-      transactions-service:
-        condition: service_healthy
+      - accounts-service
+      - transactions-service
 
     healthcheck:
       test: [ "CMD", "kong", "health" ]
