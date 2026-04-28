@@ -10,7 +10,7 @@ version: "3.8"
 # Prerequisites:
 #   - Download cluster.crt and cluster.key from Konnect UI:
 #     Gateway Manager → <your CP> → Data Plane Nodes → New Data Plane Node
-#     Save both files to ./infra/certs/
+#     Save both files to ./certs/ (relative to this infra/ directory)
 # ============================================================
 
 services:
@@ -23,7 +23,7 @@ services:
     ports:
       - "8081:8080"
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      test: [ "CMD", "wget", "-qO-", "http://localhost:8080/health" ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -37,7 +37,7 @@ services:
     ports:
       - "8082:8080"
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      test: [ "CMD", "wget", "-qO-", "http://localhost:8080/health" ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -78,12 +78,12 @@ services:
       KONG_STATUS_LISTEN: "0.0.0.0:8100"
 
     volumes:
-      - ./infra/certs:/etc/kong/cluster:ro
+      - ./certs:/etc/kong/cluster:ro
 
     ports:
-      - "8000:8000"    # HTTP proxy  — consumer entry point
-      - "8443:8443"    # HTTPS proxy — consumer entry point (TLS)
-      - "8100:8100"    # Status / /metrics endpoint (Prometheus scrape)
+      - "8000:8000" # HTTP proxy  — consumer entry point
+      - "8443:8443" # HTTPS proxy — consumer entry point (TLS)
+      - "8100:8100" # Status / /metrics endpoint (Prometheus scrape)
 
     depends_on:
       accounts-service:
@@ -92,7 +92,7 @@ services:
         condition: service_healthy
 
     healthcheck:
-      test: ["CMD", "kong", "health"]
+      test: [ "CMD", "kong", "health" ]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -106,7 +106,7 @@ services:
     image: prom/prometheus:v2.52.0
     container_name: prometheus
     volumes:
-      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
     ports:
       - "9090:9090"
@@ -125,7 +125,7 @@ services:
       GF_USERS_ALLOW_SIGN_UP: "false"
     volumes:
       - grafana-data:/var/lib/grafana
-      - ./infra/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
     ports:
       - "3000:3000"
     depends_on:

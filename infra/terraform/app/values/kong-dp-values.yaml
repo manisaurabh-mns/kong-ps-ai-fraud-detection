@@ -20,6 +20,11 @@ env:
   konnect_mode: "on"
   vitals: "off"
 
+  # Paths to cluster cert files mounted via secretVolumes below
+  # Secret is mounted at /etc/secrets/kong-cluster-cert/
+  cluster_cert:     /etc/secrets/kong-cluster-cert/tls.crt
+  cluster_cert_key: /etc/secrets/kong-cluster-cert/tls.key
+
   log_level: notice
   proxy_access_log: /dev/stdout
   proxy_error_log: /dev/stderr

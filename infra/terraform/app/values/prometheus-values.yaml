@@ -28,10 +28,11 @@ prometheus:
         memory: 600Mi
 
   # Add Kong DP scrape target
+  # The status port (8100) is exposed on the kong-dp-kong-status service
   additionalScrapeConfigs:
     - job_name: kong
       static_configs:
-        - targets: ["kong-dp-kong-proxy.kong.svc.cluster.local:8100"]
+        - targets: ["kong-dp-kong-status.kong.svc.cluster.local:8100"]
       metrics_path: /metrics
 
 # ── Grafana ────────────────────────────────────────────────────
