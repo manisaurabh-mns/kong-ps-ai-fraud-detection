@@ -1,0 +1,15 @@
+1. Global fintech company
+
+Customer Background
+A global fintech company operates APIs for:
+● Account information
+● Payments initiation
+● Transaction history
+They serve:
+● Mobile apps
+● 3rd-party fintech partners
+● Internal analytics systems
+They also want to introduce AI-powered fraud analysis without exposing their LLM directly.
+Upstream Samples
+kongcx/accounts-service:1.0.1
+docker.io/kongcx/transactions-service:1.0.1
