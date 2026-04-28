@@ -1,0 +1,29 @@
+terraform {
+  required_version = ">= 1.7.0"
+
+  cloud {
+    organization = "kong-ps-fraudplatform"
+    workspaces {
+      name = "fraud-infra-base"
+    }
+  }
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = var.aws_region
+
+  default_tags {
+    tags = {
+      Project     = "kong-fraud-platform"
+      Environment = var.environment
+      ManagedBy   = "terraform"
+    }
+  }
+}

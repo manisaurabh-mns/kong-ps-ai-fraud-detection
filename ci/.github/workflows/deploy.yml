@@ -1,0 +1,253 @@
+name: Deploy Kong Fraud Platform — EKS
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "infra/terraform/**"
+      - "kong/kong.yaml"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Action to perform"
+        required: true
+        default: "apply"
+        type: choice
+        options:
+          - apply
+          - destroy
+
+# Prevent concurrent runs on the same branch
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  TF_CLOUD_ORGANIZATION: kong-ps-fraudplatform
+  TF_VERSION: "1.7.5"
+
+jobs:
+  # ────────────────────────────────────────────────────────────
+  # Job 1 — Terraform Base (VPC + EKS)
+  # ────────────────────────────────────────────────────────────
+  terraform-base:
+    name: "TF Base — VPC & EKS"
+    runs-on: ubuntu-latest
+    environment: demo
+
+    defaults:
+      run:
+        working-directory: infra/terraform/base
+
+    outputs:
+      cluster_name: ${{ steps.tf-output.outputs.cluster_name }}
+      aws_region:   ${{ steps.tf-output.outputs.aws_region }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan
+        if: ${{ github.event.inputs.action != 'destroy' }}
+        run: terraform plan -out=tfplan -input=false
+
+      - name: Terraform Apply
+        if: ${{ github.event.inputs.action != 'destroy' }}
+        run: terraform apply -auto-approve tfplan
+
+      - name: Terraform Destroy
+        if: ${{ github.event.inputs.action == 'destroy' }}
+        run: terraform destroy -auto-approve -input=false
+
+      - name: Capture Outputs
+        id: tf-output
+        if: ${{ github.event.inputs.action != 'destroy' }}
+        run: |
+          echo "cluster_name=$(terraform output -raw cluster_name)" >> "$GITHUB_OUTPUT"
+          echo "aws_region=$(terraform output -raw aws_region)"     >> "$GITHUB_OUTPUT"
+
+  # ────────────────────────────────────────────────────────────
+  # Job 2 — Terraform App (namespaces + Helm releases)
+  # Runs after base succeeds
+  # ────────────────────────────────────────────────────────────
+  terraform-app:
+    name: "TF App — Kong DP, Keycloak, Monitoring"
+    runs-on: ubuntu-latest
+    environment: demo
+    needs: terraform-base
+    if: ${{ github.event.inputs.action != 'destroy' }}
+
+    defaults:
+      run:
+        working-directory: infra/terraform/app
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan
+        run: terraform plan -out=tfplan -input=false
+
+      - name: Terraform Apply
+        run: terraform apply -auto-approve tfplan
+
+  # ────────────────────────────────────────────────────────────
+  # Job 3 — Sync Kong config to Konnect via decK
+  # Runs after app tier is healthy
+  # ────────────────────────────────────────────────────────────
+  deck-sync:
+    name: "decK Sync — Kong Konnect Config"
+    runs-on: ubuntu-latest
+    needs: terraform-app
+    if: ${{ github.event.inputs.action != 'destroy' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install decK
+        run: |
+          curl -sL https://github.com/kong/deck/releases/latest/download/deck_linux_amd64.tar.gz \
+            | tar xz -C /usr/local/bin deck
+          deck version
+
+      - name: Validate kong.yaml
+        run: deck file validate kong/kong.yaml
+
+      - name: Ping Konnect
+        env:
+          KONNECT_PAT: ${{ secrets.KONNECT_PAT }}
+          KONNECT_CP_NAME: ${{ secrets.KONNECT_CONTROL_PLANE_NAME }}
+        run: |
+          deck gateway ping \
+            --konnect-token "$KONNECT_PAT" \
+            --konnect-control-plane-name "$KONNECT_CP_NAME"
+
+      - name: Diff (preview changes)
+        env:
+          KONNECT_PAT: ${{ secrets.KONNECT_PAT }}
+          KONNECT_CP_NAME: ${{ secrets.KONNECT_CONTROL_PLANE_NAME }}
+        run: |
+          deck gateway diff kong/kong.yaml \
+            --konnect-token "$KONNECT_PAT" \
+            --konnect-control-plane-name "$KONNECT_CP_NAME" \
+            --select-tag fraud-platform
+
+      - name: Sync to Konnect
+        env:
+          KONNECT_PAT: ${{ secrets.KONNECT_PAT }}
+          KONNECT_CP_NAME: ${{ secrets.KONNECT_CONTROL_PLANE_NAME }}
+        run: |
+          deck gateway sync kong/kong.yaml \
+            --konnect-token "$KONNECT_PAT" \
+            --konnect-control-plane-name "$KONNECT_CP_NAME" \
+            --select-tag fraud-platform
+
+  # ────────────────────────────────────────────────────────────
+  # Job 4 — Smoke Tests
+  # Verifies Kong DP is connected to Konnect and routes respond
+  # ────────────────────────────────────────────────────────────
+  smoke-test:
+    name: "Smoke Tests"
+    runs-on: ubuntu-latest
+    needs: deck-sync
+    if: ${{ github.event.inputs.action != 'destroy' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ secrets.AWS_DEFAULT_REGION }}
+
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig \
+            --region "${{ secrets.AWS_DEFAULT_REGION }}" \
+            --name   "${{ needs.terraform-base.outputs.cluster_name }}"
+
+      - name: Wait for Kong DP pods to be ready
+        run: |
+          kubectl rollout status deployment/kong-dp-kong \
+            -n kong --timeout=120s
+
+      - name: Check Kong DP status endpoint
+        run: |
+          kubectl exec -n kong \
+            $(kubectl get pods -n kong -l app=kong-dp-kong -o jsonpath='{.items[0].metadata.name}') \
+            -- curl -s http://localhost:8100/status | grep -q '"state":"running"'
+          echo "Kong DP status: OK"
+
+      - name: Check Kong DP is connected to Konnect
+        env:
+          KONNECT_PAT: ${{ secrets.KONNECT_PAT }}
+          KONNECT_CP_NAME: ${{ secrets.KONNECT_CONTROL_PLANE_NAME }}
+        run: |
+          deck gateway ping \
+            --konnect-token "$KONNECT_PAT" \
+            --konnect-control-plane-name "$KONNECT_CP_NAME"
+          echo "Konnect ping: OK"
+
+  # ────────────────────────────────────────────────────────────
+  # Job 5 — Destroy (only when triggered manually with destroy)
+  # Destroys app first, then base (reverse order)
+  # ────────────────────────────────────────────────────────────
+  destroy-app:
+    name: "Destroy — App tier"
+    runs-on: ubuntu-latest
+    environment: demo
+    needs: terraform-base
+    if: ${{ github.event.inputs.action == 'destroy' }}
+
+    defaults:
+      run:
+        working-directory: infra/terraform/app
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Destroy
+        run: terraform destroy -auto-approve -input=false

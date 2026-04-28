@@ -1,0 +1,54 @@
+# Keycloak — Helm values (demo / standalone mode)
+# Chart: bitnami/keycloak  version: 21.4.1
+# Phase 4 will configure realms, clients, and mappers.
+
+# ── Auth ──────────────────────────────────────────────────────
+auth:
+  adminUser: admin
+  # adminPassword injected via Terraform set_sensitive{}
+
+# ── HTTP config ───────────────────────────────────────────────
+http:
+  relativePath: "/"
+
+# ── Database — built-in PostgreSQL (demo only) ────────────────
+# For production: point to an external RDS instance
+postgresql:
+  enabled: true
+  auth:
+    username: keycloak
+    password: keycloak
+    database: keycloak
+  primary:
+    persistence:
+      enabled: true
+      storageClass: gp2
+      size: 2Gi
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+
+# ── Keycloak resources ────────────────────────────────────────
+resources:
+  requests:
+    cpu: 300m
+    memory: 512Mi
+  limits:
+    cpu: 700m
+    memory: 1Gi
+
+# ── Service ───────────────────────────────────────────────────
+# ClusterIP only — demo uses kubectl port-forward
+service:
+  type: ClusterIP
+  ports:
+    http: 80
+
+# ── Replica count ─────────────────────────────────────────────
+replicaCount: 1   # 1 replica is fine for demo
+
+# ── Production mode off ───────────────────────────────────────
+# Disables strict HTTPS requirement so port-forward works over HTTP
+production: false
+proxy: edge

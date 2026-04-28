@@ -1,0 +1,85 @@
+# kube-prometheus-stack — Helm values (demo / minimal)
+# Chart: prometheus-community/kube-prometheus-stack  version: 59.1.0
+
+# ── Prometheus ────────────────────────────────────────────────
+prometheus:
+  prometheusSpec:
+    # Scrape all ServiceMonitors and PodMonitors regardless of label
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+
+    # Small storage for demo (no long retention needed)
+    retention: 12h
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: gp2
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 5Gi
+
+    resources:
+      requests:
+        cpu: 200m
+        memory: 400Mi
+      limits:
+        cpu: 500m
+        memory: 600Mi
+
+  # Add Kong DP scrape target
+  additionalScrapeConfigs:
+    - job_name: kong
+      static_configs:
+        - targets: ["kong-dp-kong-proxy.kong.svc.cluster.local:8100"]
+      metrics_path: /metrics
+
+# ── Grafana ────────────────────────────────────────────────────
+grafana:
+  # adminPassword injected via Terraform set_sensitive{}
+  enabled: true
+  persistence:
+    enabled: true
+    storageClassName: gp2
+    size: 2Gi
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 300m
+      memory: 256Mi
+
+  # Pre-load Kong dashboard from grafana.com
+  dashboardProviders:
+    dashboardproviders.yaml:
+      apiVersion: 1
+      providers:
+        - name: default
+          orgId: 1
+          folder: ""
+          type: file
+          disableDeletion: false
+          editable: true
+          options:
+            path: /var/lib/grafana/dashboards/default
+
+  dashboards:
+    default:
+      kong-official:
+        gnetId: 7424        # Kong Official Dashboard on grafana.com
+        revision: 6
+        datasource: Prometheus
+
+# ── Alertmanager ──────────────────────────────────────────────
+alertmanager:
+  enabled: false    # Not needed for demo
+
+# ── node-exporter ────────────────────────────────────────────
+nodeExporter:
+  enabled: true
+
+# ── kube-state-metrics ───────────────────────────────────────
+kubeStateMetrics:
+  enabled: true

@@ -1,0 +1,92 @@
+# Kong Data Plane — Helm values
+# Chart: kong/kong  version: 2.43.0
+# Mode: Data Plane connected to Kong Konnect Control Plane
+
+image:
+  repository: kong/kong-gateway
+  tag: "3.9"
+
+# ── Data Plane mode ───────────────────────────────────────────
+env:
+  role: data_plane
+  database: "off"
+  cluster_mtls: pki
+
+  # Konnect endpoints injected by Terraform set{} blocks
+  # cluster_control_plane and cluster_telemetry_endpoint
+  # are NOT set here to avoid hardcoding
+
+  lua_ssl_trusted_certificate: system
+  konnect_mode: "on"
+  vitals: "off"
+
+  log_level: notice
+  proxy_access_log: /dev/stdout
+  proxy_error_log: /dev/stderr
+
+  # Status endpoint — Prometheus scrapes /metrics here
+  status_listen: "0.0.0.0:8100"
+
+# ── Cluster cert secret ───────────────────────────────────────
+# Mounts the kong-cluster-cert K8s secret created by Terraform
+secretVolumes:
+  - kong-cluster-cert
+
+# ── Proxy service ─────────────────────────────────────────────
+# ClusterIP only — demo uses kubectl port-forward, not NLB
+proxy:
+  enabled: true
+  type: ClusterIP
+  http:
+    enabled: true
+    containerPort: 8000
+    servicePort: 80
+  tls:
+    enabled: true
+    containerPort: 8443
+    servicePort: 443
+
+# ── Admin API ─────────────────────────────────────────────────
+# Disabled — config is pushed from Konnect, not via Admin API
+admin:
+  enabled: false
+
+# ── Status / metrics port ─────────────────────────────────────
+status:
+  enabled: true
+  http:
+    enabled: true
+    containerPort: 8100
+
+# ── Replica count ─────────────────────────────────────────────
+replicaCount: 2
+
+# ── Resource requests/limits ─────────────────────────────────
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# ── Readiness / liveness ─────────────────────────────────────
+readinessProbe:
+  httpGet:
+    path: /status
+    port: 8100
+  initialDelaySeconds: 15
+  periodSeconds: 10
+
+livenessProbe:
+  httpGet:
+    path: /status
+    port: 8100
+  initialDelaySeconds: 30
+  periodSeconds: 15
+  failureThreshold: 5
+
+# ── Ingress controller disabled ───────────────────────────────
+# Not using Kong as an Ingress controller — pure proxy mode
+ingressController:
+  enabled: false
