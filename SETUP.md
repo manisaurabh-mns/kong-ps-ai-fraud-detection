@@ -1,7 +1,8 @@
 # Setup Guide — Kong AI Fraud Detection Platform
 
-This guide covers two paths:
+This guide covers three paths:
 - **[Option A](#option-a--local-docker-compose)** — Run the full stack locally with Docker Compose (no AWS, no cost)
+- **[Option A2](#option-a2--kong-dp-as-docker-container-on-a-linux-server)** — Kong DP as a standalone Docker container on a Linux server
 - **[Option B](#option-b--aws-eks-via-cicd-pipeline)** — Deploy to AWS EKS via the GitHub Actions CI/CD pipeline
 
 ---
@@ -44,7 +45,7 @@ Prometheus, and Grafana on your local machine. No AWS account needed.
 
 1. Log in to [cloud.konghq.com](https://cloud.konghq.com)
 2. **Gateway Manager** → select your Control Plane (`fraud-platform-cp`)
-3. **Data Plane Nodes** → **New Data Plane Node** → **Kubernetes** tab
+3. **Data Plane Nodes** → **New Data Plane Node** → **Docker** tab
 4. Download `cluster.crt` and `cluster.key`
 5. Place both files in `infra/certs/` (this folder is gitignored)
 
@@ -171,6 +172,174 @@ Open [http://localhost:3000](http://localhost:3000)
 cd infra
 docker compose down          # stop and remove containers (data volumes preserved)
 docker compose down -v       # also delete Prometheus/Grafana data volumes
+```
+
+---
+
+## Option A2 — Kong DP as Docker Container on a Linux Server
+
+Use this when you have a Linux VM or server (on-prem, EC2, or any cloud VM) and want
+to run **only the Kong Data Plane** as a standalone Docker container — without Docker Compose.
+The upstream services (`accounts-service`, `transactions-service`) can run on the same host
+or elsewhere; Kong will proxy to wherever they are.
+
+### Pre-requisites
+
+| Requirement | Detail |
+|-------------|--------|
+| Linux server | Ubuntu 22.04+ / RHEL 8+ / Amazon Linux 2023 |
+| Docker Engine | 24.x — **not** Docker Desktop |
+| Port access | `8000` (proxy), `8443` (proxy TLS), `8100` (status/metrics) open inbound |
+| Kong Konnect access | Control Plane already created |
+
+Install Docker Engine on Ubuntu:
+```bash
+curl -fsSL https://get.docker.com | sudo sh
+sudo usermod -aG docker $USER
+newgrp docker
+docker --version
+```
+
+### Step 1 — Download Konnect Cluster Certificates
+
+1. Log in to [cloud.konghq.com](https://cloud.konghq.com)
+2. **Gateway Manager** → `fraud-platform-cp`
+3. **Data Plane Nodes** → **New Data Plane Node** → **Docker** tab
+4. Download `cluster.crt` and `cluster.key`
+
+Copy the cert files to your Linux server:
+```bash
+# From your local machine
+scp cluster.crt cluster.key user@<server-ip>:/etc/kong/certs/
+```
+
+Or create the directory and place them directly on the server:
+```bash
+sudo mkdir -p /etc/kong/certs
+sudo cp cluster.crt cluster.key /etc/kong/certs/
+sudo chmod 644 /etc/kong/certs/cluster.crt
+sudo chmod 600 /etc/kong/certs/cluster.key
+```
+
+### Step 2 — Get Your Konnect Endpoints
+
+**Gateway Manager** → `fraud-platform-cp` → **Overview** tab:
+- **Cluster endpoint** → e.g. `abc123.cp0.konghq.com`
+- **Telemetry endpoint** → e.g. `abc123.tp0.konghq.com`
+
+### Step 3 — Run the Kong DP Container
+
+```bash
+docker run -d \
+  --name kong-dp \
+  --restart unless-stopped \
+  -p 8000:8000 \
+  -p 8443:8443 \
+  -p 8100:8100 \
+  -v /etc/kong/certs:/etc/kong/cluster:ro \
+  -e KONG_ROLE=data_plane \
+  -e KONG_DATABASE=off \
+  -e KONG_CLUSTER_MTLS=pki \
+  -e KONG_CLUSTER_CONTROL_PLANE=<your-cp-id>.cp0.konghq.com:443 \
+  -e KONG_CLUSTER_SERVER_NAME=<your-cp-id>.cp0.konghq.com \
+  -e KONG_CLUSTER_TELEMETRY_ENDPOINT=<your-cp-id>.tp0.konghq.com:443 \
+  -e KONG_CLUSTER_TELEMETRY_SERVER_NAME=<your-cp-id>.tp0.konghq.com \
+  -e KONG_CLUSTER_CERT=/etc/kong/cluster/cluster.crt \
+  -e KONG_CLUSTER_CERT_KEY=/etc/kong/cluster/cluster.key \
+  -e KONG_LUA_SSL_TRUSTED_CERTIFICATE=system \
+  -e KONG_KONNECT_MODE=on \
+  -e KONG_VITALS=off \
+  -e KONG_LOG_LEVEL=notice \
+  -e KONG_PROXY_ACCESS_LOG=/dev/stdout \
+  -e KONG_PROXY_ERROR_LOG=/dev/stderr \
+  -e KONG_STATUS_LISTEN=0.0.0.0:8100 \
+  kong/kong-gateway:3.9
+```
+
+> Replace both `<your-cp-id>` occurrences with your actual Konnect CP ID.
+
+### Step 4 — Verify the Container is Running
+
+```bash
+# Container running
+docker ps | grep kong-dp
+
+# Logs (watch for "connected to control plane" message)
+docker logs kong-dp
+
+# Status endpoint
+curl http://localhost:8100/status
+# Look for: "state": "running"
+```
+
+In Konnect UI: **Gateway Manager** → `fraud-platform-cp` → **Data Plane Nodes**
+— the node should appear with status **Connected ●**
+
+### Step 5 — Run Upstream Services (same host)
+
+If running the upstream services on the same Linux server:
+
+```bash
+docker run -d --name accounts-service \
+  --restart unless-stopped \
+  kongcx/accounts-service:1.0.1
+
+docker run -d --name transactions-service \
+  --restart unless-stopped \
+  docker.io/kongcx/transactions-service:1.0.1
+```
+
+> **Note:** For Kong to reach these containers by hostname, either:
+> - Use Docker's default bridge network and reference by IP: `docker inspect accounts-service | grep IPAddress`
+> - Or create a shared Docker network (recommended):
+
+```bash
+# Create a shared network
+docker network create kong-net
+
+# Re-run containers on the same network (add --network kong-net to each docker run)
+# Kong can then resolve containers by name: http://accounts-service:8080
+```
+
+Update `kong/kong.yaml` service URLs to point to `http://accounts-service:8080` and
+`http://transactions-service:8080` if using the shared network, then re-sync via decK.
+
+### Step 6 — Sync Kong Config to Konnect
+
+From any machine with decK installed and network access to Konnect:
+
+```bash
+deck gateway sync kong/kong.yaml \
+  --konnect-token "$KONNECT_PAT" \
+  --konnect-control-plane-name "fraud-platform-cp" \
+  --select-tag fraud-platform
+```
+
+### Step 7 — Test
+
+```bash
+# From the Linux server or any machine that can reach it
+curl -i http://<server-ip>:8000/v1/accounts
+curl -i http://<server-ip>:8000/v1/transactions
+```
+
+### Managing the Container
+
+```bash
+# Stop
+docker stop kong-dp
+
+# Start
+docker start kong-dp
+
+# Restart (e.g. after cert rotation)
+docker restart kong-dp
+
+# View live logs
+docker logs -f kong-dp
+
+# Remove completely
+docker stop kong-dp && docker rm kong-dp
 ```
 
 ---
@@ -460,3 +629,5 @@ git push origin main
 | `kubectl` can't connect | kubeconfig not updated | Run `aws eks update-kubeconfig --region us-east-1 --name kong-fraud-platform` |
 | Kong pods `CrashLoopBackOff` on EKS | `kong-cluster-cert` secret missing or wrong | Check `kubectl get secret kong-cluster-cert -n kong`; verify cert contents in TF Cloud workspace variable |
 | Grafana shows no Kong metrics | Prometheus scrape target wrong | Check `kubectl get svc -n kong` for correct service name; update `prometheus-values.yaml` if needed |
+| Kong DP container exits on Linux server | Cert path wrong or permissions | Verify `/etc/kong/certs/` contains both files; `cluster.key` must be `chmod 600` |
+| Kong DP on Linux can't reach upstream | Containers on different Docker networks | Create a shared `docker network create kong-net` and attach all containers to it |
