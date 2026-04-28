@@ -1,0 +1,260 @@
+# ============================================================
+# Kong Konnect — Declarative Config (decK)
+# Project: AI Fraud Detection Platform
+# Managed with: deck gateway sync
+# ============================================================
+_format_version: "3.0"
+_info:
+  select_tags:
+    - fraud-platform          # scope: deck only touches objects with this tag
+
+# ============================================================
+# SERVICES & ROUTES
+# ============================================================
+#
+# Upstream URLs:
+#   Local Docker Compose : http://accounts-service:8080
+#                          http://transactions-service:8080
+#   AWS EKS              : http://accounts-service.fintech-services.svc.cluster.local:8080
+#                          http://transactions-service.fintech-services.svc.cluster.local:8080
+#
+# Switch the `url` field below when deploying to EKS.
+# ============================================================
+
+services:
+
+  # ──────────────────────────────────────────────────────────
+  # Accounts Service
+  # Image: kongcx/accounts-service:1.0.1
+  # Handles: account information, payments initiation
+  # ──────────────────────────────────────────────────────────
+  - name: accounts-service
+    url: http://accounts-service:8080
+    connect_timeout: 5000
+    read_timeout: 10000
+    write_timeout: 10000
+    retries: 2
+    tags:
+      - fraud-platform
+      - accounts
+
+    routes:
+      # GET /v1/accounts  — list accounts for authenticated consumer
+      - name: accounts-list
+        paths:
+          - /v1/accounts
+        methods:
+          - GET
+        strip_path: false
+        preserve_host: false
+        tags:
+          - fraud-platform
+          - accounts
+
+      # GET /v1/accounts/{account_id}  — get single account
+      - name: accounts-detail
+        paths:
+          - ~/v1/accounts/(?P<account_id>[^/]+)$
+        methods:
+          - GET
+        strip_path: false
+        preserve_host: false
+        tags:
+          - fraud-platform
+          - accounts
+
+      # POST /v1/payments  — payment initiation (PSD2)
+      - name: payments-initiate
+        paths:
+          - /v1/payments
+        methods:
+          - POST
+        strip_path: false
+        preserve_host: false
+        tags:
+          - fraud-platform
+          - payments
+
+    plugins:
+      # Strip internal/server headers from upstream responses
+      - name: response-transformer
+        config:
+          remove:
+            headers:
+              - x-powered-by
+              - server
+              - x-internal-trace
+        tags:
+          - fraud-platform
+
+  # ──────────────────────────────────────────────────────────
+  # Transactions Service
+  # Image: docker.io/kongcx/transactions-service:1.0.1
+  # Handles: transaction history, fraud-checked payment flow
+  # ──────────────────────────────────────────────────────────
+  - name: transactions-service
+    url: http://transactions-service:8080
+    connect_timeout: 5000
+    read_timeout: 15000        # higher — fraud check adds latency
+    write_timeout: 10000
+    retries: 2
+    tags:
+      - fraud-platform
+      - transactions
+
+    routes:
+      # GET  /v1/transactions       — list transactions
+      # POST /v1/transactions       — submit transaction (triggers fraud check internally)
+      - name: transactions-list-create
+        paths:
+          - /v1/transactions
+        methods:
+          - GET
+          - POST
+        strip_path: false
+        preserve_host: false
+        tags:
+          - fraud-platform
+          - transactions
+
+      # GET /v1/transactions/{transaction_id}  — get single transaction
+      - name: transactions-detail
+        paths:
+          - ~/v1/transactions/(?P<transaction_id>[^/]+)$
+        methods:
+          - GET
+        strip_path: false
+        preserve_host: false
+        tags:
+          - fraud-platform
+          - transactions
+
+    plugins:
+      # Strip internal headers from upstream responses
+      - name: response-transformer
+        config:
+          remove:
+            headers:
+              - x-powered-by
+              - server
+              - x-internal-trace
+        tags:
+          - fraud-platform
+
+# ============================================================
+# CONSUMERS
+# Three consumer types matching the fintech platform audiences
+# Auth credentials (OIDC / API keys) will be added in Phase 4
+# ============================================================
+consumers:
+  - username: mobile-app
+    custom_id: mobile-app-v1
+    tags:
+      - fraud-platform
+      - mobile
+
+  - username: fintech-partner
+    custom_id: fintech-partner-v1
+    tags:
+      - fraud-platform
+      - partner
+
+  - username: internal-analytics
+    custom_id: internal-analytics-v1
+    tags:
+      - fraud-platform
+      - internal
+
+# ============================================================
+# GLOBAL PLUGINS
+# Applied to every request through the gateway
+# ============================================================
+plugins:
+
+  # ── Correlation ID ─────────────────────────────────────────
+  # Injects x-correlation-id on every request.
+  # Propagated end-to-end: Kong → upstream → Fraud API → LLM.
+  # echo_downstream: consumer receives the same ID in the response.
+  - name: correlation-id
+    enabled: true
+    config:
+      header_name: x-correlation-id
+      generator: uuid#counter
+      echo_downstream: true
+    tags:
+      - fraud-platform
+
+  # ── Prometheus ─────────────────────────────────────────────
+  # Exposes /metrics on Kong's status port (8100).
+  # Scraped by Prometheus in the monitoring namespace.
+  - name: prometheus
+    enabled: true
+    config:
+      status_code_metrics: true
+      latency_metrics: true
+      bandwidth_metrics: true
+      upstream_health_metrics: true
+    tags:
+      - fraud-platform
+
+  # ── PII Redaction (pre-function) ───────────────────────────
+  # Runs in the access phase BEFORE logging.
+  # Sanitises card numbers and 16-digit sequences in the
+  # serialised log output. Does NOT modify the actual request
+  # body sent to the upstream service.
+  - name: pre-function
+    enabled: true
+    config:
+      access:
+        - |
+          -- Redact 16-digit card numbers (formatted and unformatted) in logs only
+          local serialize = kong.log.serialize
+          kong.log.serialize = function()
+            local data = serialize()
+            if data and data.request and data.request.body then
+              data.request.body = data.request.body
+                :gsub("%d%d%d%d%-%d%d%d%d%-%d%d%d%d%-%d%d%d%d", "[CARD-REDACTED]")
+                :gsub("%b\"\"", function(s)
+                  return s:gsub("%d%d%d%d%d%d%d%d%d%d%d%d%d%d%d%d", "[PAN-REDACTED]")
+                end)
+            end
+            return data
+          end
+    tags:
+      - fraud-platform
+
+  # ── Request Size Limiting ──────────────────────────────────
+  # Reject payloads above 1 MB to protect upstream services.
+  - name: request-size-limiting
+    enabled: true
+    config:
+      allowed_payload_size: 1
+      size_unit: megabytes
+      require_content_length: false
+    tags:
+      - fraud-platform
+
+  # ── Bot Detection ──────────────────────────────────────────
+  # Block known bot user agents — baseline protection.
+  - name: bot-detection
+    enabled: true
+    config:
+      allow: []
+      deny: []
+    tags:
+      - fraud-platform
+
+# ============================================================
+# PLACEHOLDERS — Phase 4+ (not active yet)
+# ============================================================
+# The following plugins are configured in later phases:
+#
+#   Phase 4: openid-connect   (OIDC / Keycloak integration)
+#   Phase 4: mtls-auth        (Fraud API internal route)
+#   Phase 5: rate-limiting-advanced  (per-consumer tiers)
+#   Phase 5: proxy-cache-advanced    (GET response caching)
+#   Phase 5: canary           (transactions A/B split)
+#   Phase 7: ai-proxy         (LLM abstraction)
+#   Phase 7: ai-prompt-guard  (prompt injection protection)
+#   Phase 7: ai-rate-limiting-advanced (token budgets)
+# ============================================================

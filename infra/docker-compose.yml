@@ -1,0 +1,143 @@
+version: "3.8"
+
+# ============================================================
+# Local Dev Stack — Kong AI Fraud Detection Platform
+# ============================================================
+# Kong Data Plane connects to your Konnect Control Plane.
+# Copy .env.example to .env and fill in your Konnect values
+# before running: docker compose up -d
+#
+# Prerequisites:
+#   - Download cluster.crt and cluster.key from Konnect UI:
+#     Gateway Manager → <your CP> → Data Plane Nodes → New Data Plane Node
+#     Save both files to ./infra/certs/
+# ============================================================
+
+services:
+
+  # ── Upstream Services ──────────────────────────────────────
+
+  accounts-service:
+    image: kongcx/accounts-service:1.0.1
+    container_name: accounts-service
+    ports:
+      - "8081:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - kong-net
+    restart: unless-stopped
+
+  transactions-service:
+    image: docker.io/kongcx/transactions-service:1.0.1
+    container_name: transactions-service
+    ports:
+      - "8082:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - kong-net
+    restart: unless-stopped
+
+  # ── Kong Data Plane ────────────────────────────────────────
+  # Connects to Konnect Control Plane via TLS cluster certs.
+  # Receives config from Konnect — no local database needed.
+
+  kong-dp:
+    image: kong/kong-gateway:3.9
+    container_name: kong-dp
+    environment:
+      KONG_ROLE: data_plane
+      KONG_DATABASE: "off"
+      KONG_CLUSTER_MTLS: pki
+
+      # Konnect Control Plane endpoints — set in .env
+      KONG_CLUSTER_CONTROL_PLANE: "${KONNECT_CP_ENDPOINT}:443"
+      KONG_CLUSTER_SERVER_NAME: "${KONNECT_CP_ENDPOINT}"
+      KONG_CLUSTER_TELEMETRY_ENDPOINT: "${KONNECT_TP_ENDPOINT}:443"
+      KONG_CLUSTER_TELEMETRY_SERVER_NAME: "${KONNECT_TP_ENDPOINT}"
+
+      # TLS cert files mounted from ./infra/certs/
+      KONG_CLUSTER_CERT: /etc/kong/cluster/cluster.crt
+      KONG_CLUSTER_CERT_KEY: /etc/kong/cluster/cluster.key
+
+      KONG_LUA_SSL_TRUSTED_CERTIFICATE: system
+      KONG_KONNECT_MODE: "on"
+      KONG_VITALS: "off"
+
+      # Logging
+      KONG_LOG_LEVEL: notice
+      KONG_PROXY_ACCESS_LOG: /dev/stdout
+      KONG_PROXY_ERROR_LOG: /dev/stderr
+      KONG_STATUS_LISTEN: "0.0.0.0:8100"
+
+    volumes:
+      - ./infra/certs:/etc/kong/cluster:ro
+
+    ports:
+      - "8000:8000"    # HTTP proxy  — consumer entry point
+      - "8443:8443"    # HTTPS proxy — consumer entry point (TLS)
+      - "8100:8100"    # Status / /metrics endpoint (Prometheus scrape)
+
+    depends_on:
+      accounts-service:
+        condition: service_healthy
+      transactions-service:
+        condition: service_healthy
+
+    healthcheck:
+      test: ["CMD", "kong", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - kong-net
+    restart: unless-stopped
+
+  # ── Prometheus ─────────────────────────────────────────────
+
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    container_name: prometheus
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - kong-net
+    restart: unless-stopped
+
+  # ── Grafana ────────────────────────────────────────────────
+
+  grafana:
+    image: grafana/grafana:10.4.2
+    container_name: grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:-admin}"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./infra/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - kong-net
+    restart: unless-stopped
+
+networks:
+  kong-net:
+    driver: bridge
+
+volumes:
+  prometheus-data:
+  grafana-data:

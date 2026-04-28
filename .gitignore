@@ -1,0 +1,36 @@
+# Environment secrets
+.env
+
+# Konnect cluster certificates — download from Konnect UI, never commit
+infra/certs/*.crt
+infra/certs/*.key
+infra/certs/*.pem
+
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfvars
+*.tfvars.json
+.terraformrc
+terraform.rc
+
+# Terraform Cloud
+.terraform.lock.hcl
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+dist/
+*.egg-info/
+
+# Node
+node_modules/
+
+# IDE
+.vscode/
+.idea/
+*.swp
