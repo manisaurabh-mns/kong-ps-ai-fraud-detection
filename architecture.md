@@ -69,7 +69,7 @@
                             +------------------------+
 ```
 
-## Infrastructure Layer (Demo — Minimal)
+## Infrastructure Layer
 
 ```
 Terraform Cloud (app.terraform.io)
@@ -77,38 +77,16 @@ Terraform Cloud (app.terraform.io)
 └── Workspace 2: fraud-infra-app   → Namespaces, Kong DP (Helm),
                                       Keycloak (Helm), kube-prometheus-stack (Helm)
 
-AWS Resources (demo mode)
-├── EKS Control Plane               ~$2.40 / day
-├── Node Group: 2× t3.large Spot    ~$1.00 / day  ← 4 vCPU / 16 GB RAM total
-│   (single group, all namespaces)
-└── VPC: 2 AZs, 1 shared NAT GW    ~$1.15 / day
-                                    ─────────────
-                              Total  ~$4.55 / day
+AWS EKS Cluster
+├── Node Group: 2× t3.large Spot  (single group, all namespaces)
+│   4 vCPU / 16 GB RAM total
+└── VPC: 2 AZs, 1 shared NAT Gateway
 
-Dropped for demo (add back for prod):
-  ✗ ECR           — Fraud API not built yet (Phase 6)
-  ✗ Secrets Manager + External Secrets Operator — use K8s secrets directly
-  ✗ 3rd AZ        — 2 AZs sufficient for demo resilience
-  ✗ NLB           — kubectl port-forward covers demo access
-
-Kong Konnect (external SaaS — you already have access)
-└── Control Plane: fraud-platform-cp  ◄── Data Plane pods connect via TLS
+Kong Konnect (external SaaS — Control Plane)
+└── fraud-platform-cp  ◄── Data Plane pods connect via TLS
 ```
 
-### Node Capacity Check (2× t3.large = 4 vCPU / 16 GB RAM)
-
-| Workload | Namespace | CPU req | RAM req |
-|----------|-----------|---------|---------|
-| Kong DP (2 replicas) | kong | 500m | 512 Mi |
-| accounts-service | fintech-services | 200m | 256 Mi |
-| transactions-service | fintech-services | 200m | 256 Mi |
-| Keycloak | security | 500m | 512 Mi |
-| Prometheus | monitoring | 300m | 512 Mi |
-| Grafana | monitoring | 200m | 256 Mi |
-| kube-system (DNS, LB ctrl) | kube-system | 300m | 300 Mi |
-| **Total** | | **~2.2 vCPU** | **~2.6 GB** |
-
-> Comfortably fits on 2× t3.large with headroom. Scale to t3.xlarge only if Fraud API + LLM workloads are added (Phase 6+).
+> For instance sizing, cost estimates, and teardown instructions see [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) — Phase 1.
 
 ## Network Policy Matrix
 
