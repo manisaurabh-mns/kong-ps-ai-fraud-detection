@@ -157,31 +157,29 @@ sudo mv deck /usr/local/bin/
 
 ### Terraform Cloud Workspace Plan
 
-Use **three workspaces** — each maps to a subfolder in `infra/terraform/` in the GitHub repo:
+Use **two workspaces** for demo — each maps to a subfolder in `infra/terraform/` in the GitHub repo:
 
 ```
 Workspace 1: fraud-infra-base
   Working dir: infra/terraform/base/
   Trigger:     changes to infra/terraform/base/**
-  Provisions:  VPC, subnets, EKS cluster, IAM roles, ECR, S3 state bucket
+  Provisions:  VPC (2 AZs), EKS cluster, IAM roles
+               (no ECR — Fraud API not built yet)
+               (no Secrets Manager — K8s secrets used directly for demo)
 
-Workspace 2: fraud-infra-addons
-  Working dir: infra/terraform/addons/
-  Trigger:     changes to infra/terraform/addons/**
-  Provisions:  EKS add-ons (AWS Load Balancer Controller, EBS CSI Driver, CoreDNS, Kube-proxy)
-               Kubernetes namespaces + Network Policies
-               AWS Secrets Manager secrets + External Secrets Operator
-
-Workspace 3: fraud-infra-app
+Workspace 2: fraud-infra-app
   Working dir: infra/terraform/app/
   Trigger:     changes to infra/terraform/app/**
-  Provisions:  Kong DP Helm release, Keycloak Helm release,
+  Provisions:  Kubernetes namespaces, EBS CSI add-on,
+               Kong DP Helm release, Keycloak Helm release,
                kube-prometheus-stack Helm release,
-               Kubernetes ConfigMaps + Secrets for services
+               K8s Secrets (Konnect cluster certs)
 ```
 
-Remote state: Workspace 2 reads outputs from Workspace 1 via `tfe_outputs` data source.
-Workspace 3 reads outputs from Workspace 1 and 2.
+Remote state: Workspace 2 reads EKS outputs from Workspace 1 via `tfe_outputs` data source.
+
+> **Dropped for demo:** AWS Load Balancer Controller (no NLB), External Secrets Operator
+> (no Secrets Manager), ECR (no custom images yet). Add these back for production.
 
 ---
 
@@ -242,23 +240,19 @@ module "eks" {
 
 | Node Group | Instance | Type | Count | Runs |
 |------------|----------|------|-------|------|
-| `demo` | t3.xlarge | Spot | 3 | Kong DP + fintech-services + fraud-api + monitoring + Keycloak |
+| `demo` | t3.large | Spot | 2 | Kong DP + fintech-services + monitoring + Keycloak |
 
-> `t3.xlarge` = 4 vCPU / 16 GB RAM each → 12 vCPU / 48 GB total — enough for all pods.
+> `t3.large` = 2 vCPU / 8 GB RAM each → 4 vCPU / 16 GB total.
+> All demo workloads need ~2.2 vCPU / 2.6 GB — fits with plenty of headroom.
+> Upgrade to t3.xlarge only when Fraud API + LLM (Phase 6+) are added.
 > Spot interruptions are acceptable for a demo environment.
 
-#### Workspace 2 — `fraud-infra-addons`
+#### Workspace 2 — `fraud-infra-app`
 
 Key resources provisioned:
 ```hcl
-# AWS Load Balancer Controller (for Kong's NLB/ALB ingress)
-resource "helm_release" "aws_lb_controller" { ... }
-
-# EBS CSI Driver (for Prometheus/Grafana PVCs)
+# EBS CSI Driver (for Prometheus/Grafana PVCs — built-in EKS add-on, no extra controller)
 resource "aws_eks_addon" "ebs_csi" { ... }
-
-# External Secrets Operator (sync AWS Secrets Manager → K8s Secrets)
-resource "helm_release" "external_secrets" { ... }
 
 # Kubernetes namespaces
 resource "kubernetes_namespace" "namespaces" {
@@ -266,15 +260,15 @@ resource "kubernetes_namespace" "namespaces" {
   ...
 }
 
-# Network Policies (deny-all default + explicit allow rules)
-resource "kubernetes_network_policy" "deny_all" { ... }
-resource "kubernetes_network_policy" "allow_kong_to_fintech" { ... }
-resource "kubernetes_network_policy" "allow_fintech_to_fraud" { ... }
-```
+# K8s Secret: Konnect cluster certs (stored directly, no Secrets Manager needed for demo)
+resource "kubernetes_secret" "kong_cluster_cert" {
+  metadata { name = "kong-cluster-cert" ; namespace = "kong" }
+  data = {
+    "tls.crt" = file("${path.module}/certs/cluster.crt")
+    "tls.key" = file("${path.module}/certs/cluster.key")
+  }
+}
 
-#### Workspace 3 — `fraud-infra-app`
-
-```hcl
 # Kong Data Plane via Helm
 resource "helm_release" "kong_dp" {
   name       = "kong-dp"
@@ -290,6 +284,7 @@ resource "helm_release" "monitoring" {
   namespace  = "monitoring"
   repository = "https://prometheus-community.github.io/helm-charts"
   chart      = "kube-prometheus-stack"
+  values     = [file("${path.module}/values/prometheus-values.yaml")]
 }
 
 # Keycloak
@@ -298,6 +293,7 @@ resource "helm_release" "keycloak" {
   namespace  = "security"
   repository = "https://charts.bitnami.com/bitnami"
   chart      = "keycloak"
+  values     = [file("${path.module}/values/keycloak-values.yaml")]
 }
 ```
 
@@ -314,18 +310,12 @@ kong-ps-ai-fraud-detection/
 │       │   ├── vpc.tf
 │       │   ├── eks.tf
 │       │   ├── iam.tf
-│       │   ├── ecr.tf
 │       │   ├── outputs.tf
 │       │   └── variables.tf
-│       ├── addons/                  # Workspace 2: EKS add-ons + namespaces
-│       │   ├── main.tf
-│       │   ├── addons.tf
-│       │   ├── namespaces.tf
-│       │   ├── network_policies.tf
-│       │   ├── external_secrets.tf
-│       │   └── variables.tf
-│       └── app/                     # Workspace 3: Helm releases
+│       └── app/                     # Workspace 2: namespaces + Helm releases
 │           ├── main.tf
+│           ├── namespaces.tf
+│           ├── secrets.tf           # K8s secrets (Konnect certs)
 │           ├── kong.tf
 │           ├── monitoring.tf
 │           ├── keycloak.tf
@@ -365,15 +355,14 @@ git push origin infra/phase-1-bootstrap
 
 1. Log in to [app.terraform.io](https://app.terraform.io)
 2. Create Organization → `kong-ps-fraudplatform`
-3. Create **3 workspaces** (Version control workflow → GitHub → select repo):
+3. Create **2 workspaces** (Version control workflow → GitHub → select repo):
    - `fraud-infra-base` → working dir: `infra/terraform/base`
-   - `fraud-infra-addons` → working dir: `infra/terraform/addons`
    - `fraud-infra-app` → working dir: `infra/terraform/app`
 4. In **Organization Settings → Variable Sets** create `aws-credentials`:
    - `AWS_ACCESS_KEY_ID` = `<value>` (env var, sensitive)
    - `AWS_SECRET_ACCESS_KEY` = `<value>` (env var, sensitive)
    - `AWS_DEFAULT_REGION` = `us-east-1` (env var)
-5. Apply the variable set to all 3 workspaces
+5. Apply the variable set to both workspaces
 6. Generate a **Team API Token** (`Settings → Teams → owners → Team API Token`)
 7. Add the token as GitHub repo secret: `TF_API_TOKEN`
 
@@ -543,14 +532,15 @@ Secrets to store in AWS Secrets Manager:
 | Resource | Spec | Est. Monthly | Est. Per Day |
 |----------|------|-------------|-------------|
 | EKS Control Plane | Managed | $73 | ~$2.40 |
-| EC2 — demo nodes | 3× t3.xlarge **Spot** (~$0.047/hr each) | ~$102 | ~$3.40 |
+| EC2 — demo nodes | 2× t3.large **Spot** (~$0.022/hr each) | ~$32 | ~$1.05 |
 | NAT Gateway | 1× shared | ~$35 | ~$1.15 |
 | NLB | **None** — use `kubectl port-forward` | $0 | $0 |
-| Secrets Manager | ~5 secrets | <$3 | <$0.10 |
-| **Total (approx.)** | | **~$213/month** | **~$7/day** |
+| Secrets Manager | None (K8s secrets) | $0 | $0 |
+| ECR | None (no custom images yet) | $0 | $0 |
+| **Total (approx.)** | | **~$140/month** | **~$4.60/day** |
 
 > **Demo tip:** Spin up in the morning, `terraform destroy` the same evening.  
-> A full-day demo run costs roughly **$7–10**. EKS control plane is the fixed cost at $2.40/day.
+> A full-day demo run costs roughly **$5**. EKS control plane is the fixed cost at $2.40/day.
 
 ---
 
@@ -559,7 +549,7 @@ Secrets to store in AWS Secrets Manager:
 ```bash
 # 1. Destroy in reverse order — app first, then addons, then base
 # Option A: via Terraform Cloud UI — queue destroy run on each workspace in order:
-#   fraud-infra-app  →  fraud-infra-addons  →  fraud-infra-base
+#   fraud-infra-app  →  fraud-infra-base
 
 # Option B: from local CLI
 cd infra/terraform/app     && terraform destroy -auto-approve
